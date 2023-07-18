@@ -81,6 +81,19 @@ int
 sys_pgaccess(void)
 {
   // lab pgtbl: your code here.
+  uint64 start_addr;
+  if(argaddr(0, &start_addr) < 0)
+    return -1;
+  int n_page;
+  if(argint(1, &n_page) < 0)
+    return -1;
+  uint64 res_addr;
+  if(argaddr(2, &res_addr) < 0)
+    return -1;
+
+  if(pgaccess(myproc()->pagetable, start_addr, n_page, res_addr) < 0)
+    return -1;
+  
   return 0;
 }
 #endif
