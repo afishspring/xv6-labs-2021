@@ -283,6 +283,43 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+static struct inode* follow_symlink(struct inode* ip) {
+  uint inums[NSYMLINK];
+  int i, j;
+  char target[MAXPATH];
+
+  for(i = 0; i < NSYMLINK; ++i) {
+    inums[i] = ip->inum;
+    // read the target path from symlink file
+    if(readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0) {
+      iunlockput(ip);
+      printf("open_symlink: open symlink failed\n");
+      return 0;
+    }
+    iunlockput(ip);
+    
+    // get the inode of target path 
+    if((ip = namei(target)) == 0) {
+      printf("open_symlink: path \"%s\" is not exist\n", target);
+      return 0;
+    }
+    for(j = 0; j <= i; ++j) {
+      if(ip->inum == inums[j]) {
+        printf("open_symlink: links form a cycle\n");
+        return 0;
+      }
+    }
+    ilock(ip);
+    if(ip->type != T_SYMLINK) {
+      return ip;
+    }
+  }
+
+  iunlockput(ip);
+  printf("open_symlink: the depth of links reaches the limit\n");
+  return 0;
+}
+
 uint64
 sys_open(void)
 {
@@ -311,6 +348,14 @@ sys_open(void)
     ilock(ip);
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
+      end_op();
+      return -1;
+    }
+  }
+
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
+    if((ip = follow_symlink(ip)) == 0) {
+      // 此处不用调用iunlockput()释放锁,因为在follow_symlinktest()返回失败时ip的锁在函数内已经被释放
       end_op();
       return -1;
     }
@@ -482,5 +527,27 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH],path[MAXPATH];
+  struct inode *ip;
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+  begin_op();
+  // create a new inode
+  if ((ip = create(path,T_SYMLINK,0,0)) == 0) {
+    end_op();
+    return -1;
+  }
+  // store target into inode's data
+  if (writei(ip,0,(uint64)target,0,MAXPATH) != MAXPATH) {
+    panic("writei fail in symlink");
+  }
+  iunlockput(ip);
+  end_op();
   return 0;
 }
