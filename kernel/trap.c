@@ -5,7 +5,17 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
-
+#include "fcntl.h"
+struct file {
+  enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
+  int ref; // reference count
+  char readable;
+  char writable;
+  struct pipe *pipe; // FD_PIPE
+  struct inode *ip;  // FD_INODE and FD_DEVICE
+  uint off;          // FD_INODE
+  short major;       // FD_DEVICE
+};
 struct spinlock tickslock;
 uint ticks;
 
@@ -28,6 +38,58 @@ trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
 }
+
+int mmap_handler(int va, int cause) {
+  int i;
+  struct proc* p = myproc();
+  // 根据地址查找属于哪一个VMA
+  for(i = 0; i < NVMA; ++i) {
+    if(p->vmas[i].used && p->vmas[i].addr <= va && va <= p->vmas[i].addr + p->vmas[i].len - 1) {
+      break;
+    }
+  }
+  if(i == NVMA)
+    return -1;
+
+  int pte_flags = PTE_U;
+  if(p->vmas[i].prot & PROT_READ) pte_flags |= PTE_R;
+  if(p->vmas[i].prot & PROT_WRITE) pte_flags |= PTE_W;
+  if(p->vmas[i].prot & PROT_EXEC) pte_flags |= PTE_X;
+
+
+  struct file* vf = p->vmas[i].f;
+  if(cause == 13 && vf->readable == 0) return -1;
+  if(cause == 15 && vf->writable == 0) return -1;
+
+  void* pa = kalloc();
+  if(pa == 0)
+    return -1;
+  memset(pa, 0, PGSIZE);
+
+  // 读取文件内容
+  ilock(vf->ip);
+  // 计算当前页面读取文件的偏移量，实验中p->vma[i].offset总是0
+  // 要按顺序读读取，例如内存页面A,B和文件块a,b
+  // 则A读取a，B读取b，而不能A读取b，B读取a
+  int offset = p->vmas[i].offset + PGROUNDDOWN(va - p->vmas[i].addr);
+  int readbytes = readi(vf->ip, 0, (uint64)pa, offset, PGSIZE);
+  // 什么都没有读到
+  if(readbytes == 0) {
+    iunlock(vf->ip);
+    kfree(pa);
+    return -1;
+  }
+  iunlock(vf->ip);
+
+  // 添加页面映射
+  if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)pa, pte_flags) != 0) {
+    kfree(pa);
+    return -1;
+  }
+
+  return 0;
+}
+
 
 //
 // handle an interrupt, exception, or system call from user space.
@@ -65,6 +127,14 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15){
+    uint64 fault_va = r_stval();
+    if(PGROUNDUP(p->trapframe->sp) - 1 < fault_va && fault_va < p->sz) {
+      if(mmap_handler(r_stval(), r_scause()) != 0)
+        p->killed = 1;
+    } 
+    else
+      p->killed = 1;
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

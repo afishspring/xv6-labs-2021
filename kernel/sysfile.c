@@ -484,3 +484,94 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int len;
+  int prot;
+  int flags;
+  int vfd;
+  struct file* f;
+  int offset;
+  uint64 err = 0xffffffffffffffff;
+
+  if(argaddr(0, &addr) < 0 || argint(1, &len) < 0 || argint(2, &prot) < 0 ||
+    argint(3, &flags) < 0 || argfd(4, &vfd, &f) < 0 || argint(5, &offset) < 0)
+    return err;
+  if(addr != 0 || len < 0 || offset != 0)
+    return err;
+  if(f->readable && !f->writable && (prot & PROT_READ) && (prot & PROT_WRITE) && (flags & MAP_SHARED))
+    return err;
+
+  struct proc *p = myproc();
+
+  if(p->sz + len > MAXVA)
+    return err;
+
+  for(int i=0; i< NVMA ;i++){
+    if(p->vmas[i].used == 0){
+      p->vmas[i].used = 1;
+      p->vmas[i].addr = p->sz;
+      p->vmas[i].len = len;
+      p->vmas[i].flags = flags;
+      p->vmas[i].prot = prot;
+      p->vmas[i].f = f;
+      p->vmas[i].vfd = vfd;
+      p->vmas[i].offset = offset;
+
+      filedup(f);
+
+      p->sz += len;
+      return p->vmas[i].addr;
+    }
+  }
+  return err;
+}
+
+uint64
+sys_munmap(void) {
+  uint64 addr;
+  int length;
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  int i;
+  struct proc* p = myproc();
+  for(i = 0; i < NVMA; ++i) {
+    if(p->vmas[i].used && p->vmas[i].len >= length) {
+      // 根据提示，munmap的地址范围只能是
+      // 1. 起始位置
+      if(addr == p->vmas[i].addr) {
+        p->vmas[i].addr += length;
+        p->vmas[i].len -= length;
+        break;
+      }
+      // 2. 结束位置
+      if(addr + length == p->vmas[i].addr + p->vmas[i].len) {
+        p->vmas[i].len -= length;
+        break;
+      }
+    }
+  }
+  if(i == NVMA)
+    return -1;
+
+  // 将MAP_SHARED页面写回文件系统
+  if(p->vmas[i].flags == MAP_SHARED && (p->vmas[i].prot & PROT_WRITE) != 0) {
+    filewrite(p->vmas[i].f, addr, length);
+  }
+
+  // 判断此页面是否存在映射
+  uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+
+
+  // 当前VMA中全部映射都被取消
+  if(p->vmas[i].len == 0) {
+    fileclose(p->vmas[i].f);
+    p->vmas[i].used = 0;
+  }
+
+  return 0;
+}
